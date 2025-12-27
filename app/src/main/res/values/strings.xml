@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SSH Terminal</string>
+
+    <!-- Navigation -->
+    <string name="nav_hosts">Hosts</string>
+    <string name="nav_keys">Keys</string>
+    <string name="nav_settings">Settings</string>
+
+    <!-- Host Management -->
+    <string name="add_host">Add Host</string>
+    <string name="edit_host">Edit Host</string>
+    <string name="delete_host">Delete Host</string>
+    <string name="host_name">Host Name</string>
+    <string name="host_address">Address</string>
+    <string name="host_port">Port</string>
+    <string name="host_username">Username</string>
+    <string name="host_key">Authentication Key</string>
+
+    <!-- Key Management -->
+    <string name="generate_key">Generate Key</string>
+    <string name="import_key">Import Key</string>
+    <string name="export_key">Export Public Key</string>
+    <string name="delete_key">Delete Key</string>
+    <string name="key_name">Key Name</string>
+    <string name="key_type">Key Type</string>
+    <string name="key_type_rsa">RSA</string>
+    <string name="key_type_ed25519">Ed25519</string>
+    <string name="key_type_ecdsa">ECDSA</string>
+    <string name="key_bits">Key Size (bits)</string>
+
+    <!-- Connection -->
+    <string name="connect">Connect</string>
+    <string name="disconnect">Disconnect</string>
+    <string name="connecting">Connecting...</string>
+    <string name="connected">Connected</string>
+    <string name="disconnected">Disconnected</string>
+    <string name="connection_error">Connection Error</string>
+
+    <!-- Port Forwarding -->
+    <string name="port_forwarding">Port Forwarding</string>
+    <string name="local_forward">Local Forward</string>
+    <string name="remote_forward">Remote Forward</string>
+    <string name="dynamic_forward">Dynamic Forward (SOCKS)</string>
+    <string name="local_port">Local Port</string>
+    <string name="remote_host">Remote Host</string>
+    <string name="remote_port">Remote Port</string>
+
+    <!-- Actions -->
+    <string name="save">Save</string>
+    <string name="cancel">Cancel</string>
+    <string name="copy">Copy</string>
+    <string name="paste">Paste</string>
+    <string name="share">Share</string>
+
+    <!-- Terminal -->
+    <string name="terminal_session">Terminal Session</string>
+    <string name="send_special_key">Send Special Key</string>
+
+    <!-- Errors -->
+    <string name="error_invalid_host">Invalid host address</string>
+    <string name="error_invalid_port">Invalid port number</string>
+    <string name="error_key_generation_failed">Key generation failed</string>
+    <string name="error_connection_failed">Connection failed: %1$s</string>
+    <string name="error_authentication_failed">Authentication failed</string>
+</resources>
