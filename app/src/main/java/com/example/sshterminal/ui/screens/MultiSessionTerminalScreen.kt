@@ -30,18 +30,14 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -71,7 +67,8 @@ import org.koin.android.ext.android.inject
 import org.koin.androidx.compose.koinViewModel
 import org.koin.compose.koinInject
 
-@OptIn(ExperimentalMaterial3Api::class)
+private const val TAG = "MultiSessionTerminal"
+
 @Composable
 fun MultiSessionTerminalScreen(
     initialHostId: Long? = null,
@@ -88,7 +85,13 @@ fun MultiSessionTerminalScreen(
 
     var showCloseConfirm by remember { mutableStateOf(false) }
     var sessionToClose by remember { mutableStateOf<String?>(null) }
-    val terminalViews = remember { mutableMapOf<String, TerminalAndroidView>() }
+    // Use mutableStateMapOf for proper recomposition on changes
+    val terminalViews = remember { androidx.compose.runtime.mutableStateMapOf<String, TerminalAndroidView>() }
+
+    // Log state changes for debugging
+    LaunchedEffect(activeSessionId) {
+        android.util.Log.d(TAG, "Active session changed: $activeSessionId")
+    }
 
     // Get terminal colors from scheme
     val terminalColors = remember(terminalColorScheme) {
@@ -102,11 +105,25 @@ fun MultiSessionTerminalScreen(
         }
     }
 
-    // Handle terminal data
+    // Handle terminal data - routes data to correct session's view
     LaunchedEffect(Unit) {
         viewModel.terminalDataForSession.collect { (sessionId, data) ->
-            terminalViews[sessionId]?.processData(data)
+            // Only process data for views that exist and match the session
+            terminalViews[sessionId]?.let { view ->
+                // Verify the view's emulator matches the session's emulator
+                val sessionEmulator = viewModel.getSession(sessionId)?.terminalEmulator
+                if (sessionEmulator != null && view.getTerminalEmulator() === sessionEmulator) {
+                    view.processData(data)
+                }
+            }
         }
+    }
+
+    // Cleanup closed sessions from terminalViews map
+    LaunchedEffect(sessionList) {
+        val currentSessionIds = sessionList.map { it.id }.toSet()
+        val viewsToRemove = terminalViews.keys.filter { it !in currentSessionIds }
+        viewsToRemove.forEach { terminalViews.remove(it) }
     }
 
     // Handle back press
@@ -118,61 +135,68 @@ fun MultiSessionTerminalScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    title = { Text("Terminal") },
-                    navigationIcon = {
-                        IconButton(onClick = {
-                            if (sessionList.isNotEmpty()) {
-                                showCloseConfirm = true
-                            } else {
-                                onExit()
-                            }
-                        }) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                        }
-                    },
-                    actions = {
-                        // Add new session button
-                        IconButton(onClick = onAddSession) {
-                            Icon(Icons.Default.Add, contentDescription = "New Session")
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color(0xFF1E1E1E),
-                        titleContentColor = Color.White,
-                        navigationIconContentColor = Color.White,
-                        actionIconContentColor = Color.White
-                    )
-                )
-
-                // Session tabs
-                if (sessionList.isNotEmpty()) {
-                    SessionTabBar(
-                        sessions = sessionList,
-                        activeSessionId = activeSessionId,
-                        onSessionSelected = { viewModel.switchSession(it) },
-                        onSessionClose = { sessionId ->
-                            sessionToClose = sessionId
-                        }
-                    )
-                }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(terminalColors.background))
+    ) {
+        // Top bar - minimal height
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Color(0xFF1E1E1E))
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(
+                onClick = {
+                    if (sessionList.isNotEmpty()) {
+                        showCloseConfirm = true
+                    } else {
+                        onExit()
+                    }
+                },
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White)
+            }
+            Text(
+                "Terminal",
+                color = Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier.weight(1f)
+            )
+            IconButton(
+                onClick = onAddSession,
+                modifier = Modifier.size(36.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "New Session", tint = Color.White)
             }
         }
-    ) { padding ->
-        Column(
+
+        // Session tabs
+        if (sessionList.isNotEmpty()) {
+            SessionTabBar(
+                sessions = sessionList,
+                activeSessionId = activeSessionId,
+                onSessionSelected = { viewModel.switchSession(it) },
+                onSessionClose = { sessionId ->
+                    sessionToClose = sessionId
+                }
+            )
+        }
+
+        // Main content - fills remaining space
+        Box(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
+                .weight(1f)
+                .fillMaxWidth()
         ) {
             if (sessionList.isEmpty()) {
                 // No sessions
                 Box(
                     modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
+                        .fillMaxSize()
                         .background(Color(terminalColors.background)),
                     contentAlignment = Alignment.Center
                 ) {
@@ -194,8 +218,7 @@ fun MultiSessionTerminalScreen(
                     is TerminalSession.SessionState.Connecting -> {
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .background(Color(terminalColors.background)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -208,61 +231,95 @@ fun MultiSessionTerminalScreen(
                     }
 
                     is TerminalSession.SessionState.Connected -> {
-                        // Terminal view
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .background(Color(terminalColors.background))
+                        // Use Column for terminal + toolbar
+                        Column(
+                            modifier = Modifier.fillMaxSize()
                         ) {
-                            TerminalView(
-                                modifier = Modifier.fillMaxSize(),
-                                colorScheme = terminalColorScheme,
-                                onSendData = { data -> viewModel.sendData(data) },
-                                onSizeChanged = { cols, rows ->
-                                    viewModel.resizeTerminal(cols, rows)
-                                },
-                                onViewCreated = { view ->
-                                    activeSessionId?.let { sessionId ->
-                                        terminalViews[sessionId] = view
-                                        // Restore terminal content from emulator
-                                        viewModel.getSession(sessionId)?.terminalEmulator?.let { emulator ->
-                                            view.setTerminalEmulator(emulator)
+                            // Terminal view - takes remaining space
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .background(Color(terminalColors.background))
+                            ) {
+                                // Key the terminal view by session ID to ensure proper recreation
+                                androidx.compose.runtime.key(activeSessionId) {
+                                    TerminalView(
+                                        modifier = Modifier.fillMaxSize(),
+                                        colorScheme = terminalColorScheme,
+                                        onSendData = { data ->
+                                            android.util.Log.d(TAG, "onSendData called: ${data.size} bytes")
+                                            viewModel.sendData(data)
+                                        },
+                                        onSizeChanged = { cols, rows ->
+                                            android.util.Log.d(TAG, "onSizeChanged: ${cols}x${rows}")
+                                            viewModel.resizeTerminal(cols, rows)
+                                        },
+                                        onViewCreated = { view ->
+                                            activeSessionId?.let { sessionId ->
+                                                android.util.Log.d(TAG, "View created for session: $sessionId")
+                                                terminalViews[sessionId] = view
+                                                // Restore terminal content from emulator
+                                                viewModel.getSession(sessionId)?.terminalEmulator?.let { emulator ->
+                                                    android.util.Log.d(TAG, "Setting emulator for session: $sessionId")
+                                                    view.setTerminalEmulator(emulator)
+                                                }
+                                            }
                                         }
+                                    )
+                                }
+                            }
+
+                            // Special keys toolbar - fixed at bottom
+                            MultiSessionSpecialKeysToolbar(
+                                onSendCtrl = { char ->
+                                    activeSessionId?.let { sessionId ->
+                                        val view = terminalViews[sessionId]
+                                        android.util.Log.d(TAG, "sendCtrl: $char, view=$view")
+                                        view?.sendCtrl(char)
+                                    }
+                                },
+                                onSendEscape = {
+                                    activeSessionId?.let { sessionId ->
+                                        val view = terminalViews[sessionId]
+                                        android.util.Log.d(TAG, "sendEscape, view=$view")
+                                        view?.sendEscape()
+                                    }
+                                },
+                                onSendTab = {
+                                    activeSessionId?.let { sessionId ->
+                                        val view = terminalViews[sessionId]
+                                        android.util.Log.d(TAG, "sendTab, view=$view")
+                                        view?.sendTab()
+                                    }
+                                },
+                                onSendArrow = { dir ->
+                                    activeSessionId?.let { sessionId ->
+                                        val view = terminalViews[sessionId]
+                                        android.util.Log.d(TAG, "sendArrow: $dir, view=$view")
+                                        view?.sendArrow(dir)
+                                    }
+                                },
+                                onSendText = { text ->
+                                    android.util.Log.d(TAG, "sendText from toolbar: '$text'")
+                                    viewModel.sendData(text.toByteArray(Charsets.UTF_8))
+                                },
+                                onShowKeyboard = {
+                                    activeSessionId?.let { sessionId ->
+                                        val view = terminalViews[sessionId]
+                                        android.util.Log.d(TAG, "showKeyboard, view=$view, sessionId=$sessionId")
+                                        view?.requestFocus()
+                                        view?.showSoftKeyboard()
                                     }
                                 }
                             )
                         }
-
-                        // Special keys toolbar
-                        MultiSessionSpecialKeysToolbar(
-                            onSendCtrl = { char ->
-                                activeSessionId?.let { terminalViews[it]?.sendCtrl(char) }
-                            },
-                            onSendEscape = {
-                                activeSessionId?.let { terminalViews[it]?.sendEscape() }
-                            },
-                            onSendTab = {
-                                activeSessionId?.let { terminalViews[it]?.sendTab() }
-                            },
-                            onSendArrow = { dir ->
-                                activeSessionId?.let { terminalViews[it]?.sendArrow(dir) }
-                            },
-                            onSendText = { text ->
-                                viewModel.sendData(text.toByteArray(Charsets.UTF_8))
-                            },
-                            onShowKeyboard = {
-                                activeSessionId?.let { terminalViews[it]?.requestFocus() }
-                                activeSessionId?.let { terminalViews[it]?.showSoftKeyboard() }
-                            }
-                        )
                     }
 
                     is TerminalSession.SessionState.Disconnected -> {
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .background(Color(terminalColors.background)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -290,8 +347,7 @@ fun MultiSessionTerminalScreen(
                         val error = activeSession.state as TerminalSession.SessionState.Error
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .background(Color(terminalColors.background)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -320,8 +376,7 @@ fun MultiSessionTerminalScreen(
                     is TerminalSession.SessionState.Reconnecting -> {
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .background(Color(terminalColors.background)),
                             contentAlignment = Alignment.Center
                         ) {
@@ -339,8 +394,7 @@ fun MultiSessionTerminalScreen(
                     null -> {
                         Box(
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
+                                .fillMaxSize()
                                 .background(Color(terminalColors.background)),
                             contentAlignment = Alignment.Center
                         ) {

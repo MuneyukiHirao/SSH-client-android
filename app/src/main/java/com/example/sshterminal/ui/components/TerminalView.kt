@@ -17,7 +17,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
@@ -60,21 +62,39 @@ class TerminalAndroidView @JvmOverloads constructor(
 
     // IME composition state
     private var composingText: String = ""
-    private var composingStart: Int = 0
 
-    // Callbacks
+    // Callbacks - use thread-safe volatile
+    @Volatile
     var onSendData: ((ByteArray) -> Unit)? = null
+    @Volatile
     var onSizeChanged: ((Int, Int) -> Unit)? = null
 
-    private val _inputEvents = MutableSharedFlow<String>()
-    val inputEvents: SharedFlow<String> = _inputEvents
+    // Debug logging
+    private val TAG = "TerminalAndroidView"
 
     init {
         isFocusable = true
         isFocusableInTouchMode = true
+        importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
 
         // Enable hardware acceleration for better performance
         setLayerType(LAYER_TYPE_HARDWARE, null)
+
+        // Request focus when attached to window
+        addOnAttachStateChangeListener(object : OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(v: View) {
+                android.util.Log.d(TAG, "View attached to window")
+                postDelayed({
+                    if (isAttachedToWindow) {
+                        val focused = requestFocus()
+                        android.util.Log.d(TAG, "Focus requested: $focused")
+                    }
+                }, 200)
+            }
+            override fun onViewDetachedFromWindow(v: View) {
+                android.util.Log.d(TAG, "View detached from window")
+            }
+        })
 
         emulator.onScreenUpdate = {
             // Use dirty region for partial invalidation when available
@@ -139,12 +159,17 @@ class TerminalAndroidView @JvmOverloads constructor(
         // Draw background
         canvas.drawColor(terminalColors.background)
 
+        // Cache rows/columns to prevent race condition during iteration
+        val currentRows = emulator.rows
+        val currentColumns = emulator.columns
+
         // Draw terminal content
-        for (y in 0 until emulator.rows) {
+        for (y in 0 until currentRows) {
             val line = emulator.getLine(y) ?: continue
             val yPos = y * charHeight + charBaseline
+            val lineLength = minOf(line.size, currentColumns)
 
-            for (x in 0 until emulator.columns) {
+            for (x in 0 until lineLength) {
                 val cell = line[x]
                 val xPos = x * charWidth
 
@@ -171,43 +196,51 @@ class TerminalAndroidView @JvmOverloads constructor(
             }
         }
 
-        // Draw cursor
+        // Draw cursor (with bounds check)
         if (isFocused) {
-            val cursorX = emulator.cursorX * charWidth
-            val cursorY = emulator.cursorY * charHeight
+            val curX = emulator.cursorX.coerceIn(0, currentColumns - 1)
+            val curY = emulator.cursorY.coerceIn(0, currentRows - 1)
+            val cursorXPos = curX * charWidth
+            val cursorYPos = curY * charHeight
 
             cursorPaint.color = terminalColors.cursorColor
             cursorPaint.alpha = 180
             canvas.drawRect(
-                cursorX,
-                cursorY,
-                cursorX + charWidth,
-                cursorY + charHeight,
+                cursorXPos,
+                cursorYPos,
+                cursorXPos + charWidth,
+                cursorYPos + charHeight,
                 cursorPaint
             )
         }
 
         // Draw composition text (IME input in progress)
         if (composingText.isNotEmpty()) {
-            val compX = emulator.cursorX * charWidth
-            val compY = emulator.cursorY * charHeight + charBaseline
+            val curX = emulator.cursorX.coerceIn(0, currentColumns - 1)
+            val curY = emulator.cursorY.coerceIn(0, currentRows - 1)
+            val compX = curX * charWidth
+            val compY = curY * charHeight + charBaseline
 
-            // Background for composition
+            // Background for composition (clamp to screen width)
             bgPaint.color = terminalColors.selectionBackground
             val compWidth = textPaint.measureText(composingText)
+            val clampedWidth = minOf(compX + compWidth, width.toFloat())
             canvas.drawRect(
                 compX,
-                emulator.cursorY * charHeight,
-                compX + compWidth,
-                (emulator.cursorY + 1) * charHeight,
+                curY * charHeight,
+                clampedWidth,
+                (curY + 1) * charHeight,
                 bgPaint
             )
 
-            // Draw composition text with underline
+            // Draw composition text with underline (clipped to screen)
+            canvas.save()
+            canvas.clipRect(0f, 0f, width.toFloat(), height.toFloat())
             textPaint.color = terminalColors.brightYellow
             textPaint.isUnderlineText = true
             canvas.drawText(composingText, compX, compY, textPaint)
             textPaint.isUnderlineText = false
+            canvas.restore()
         }
 
         // Clear dirty flag after drawing
@@ -244,17 +277,29 @@ class TerminalAndroidView @JvmOverloads constructor(
     override fun onTouchEvent(event: MotionEvent): Boolean {
         when (event.action) {
             MotionEvent.ACTION_UP -> {
-                // Request focus and show keyboard
-                requestFocus()
+                // Request focus and show keyboard on touch
+                if (!hasFocus()) {
+                    requestFocus()
+                }
                 showKeyboard()
             }
         }
         return true
     }
 
+    fun showSoftKeyboard() {
+        showKeyboard()
+    }
+
     private fun showKeyboard() {
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        post {
+            if (requestFocus()) {
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+                // Restart input to ensure InputConnection is properly created
+                imm.restartInput(this)
+                imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
     }
 
     fun hideKeyboard() {
@@ -292,9 +337,9 @@ class TerminalAndroidView @JvmOverloads constructor(
     ) : BaseInputConnection(targetView, true) {
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            android.util.Log.d(TAG, "commitText: '$text'")
             // Clear composition state
             composingText = ""
-            composingStart = 0
 
             // Send committed text to terminal
             text?.let { t ->
@@ -306,6 +351,7 @@ class TerminalAndroidView @JvmOverloads constructor(
         }
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            android.util.Log.d(TAG, "setComposingText: '$text'")
             // Update composition display
             composingText = text?.toString() ?: ""
 
@@ -314,6 +360,7 @@ class TerminalAndroidView @JvmOverloads constructor(
         }
 
         override fun finishComposingText(): Boolean {
+            android.util.Log.d(TAG, "finishComposingText: '$composingText'")
             if (composingText.isNotEmpty()) {
                 sendText(composingText)
                 composingText = ""
@@ -323,6 +370,7 @@ class TerminalAndroidView @JvmOverloads constructor(
         }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
+            android.util.Log.d(TAG, "deleteSurroundingText: before=$beforeLength, after=$afterLength")
             // Send backspace for each character to delete
             repeat(beforeLength) {
                 sendData(byteArrayOf(0x7F)) // DEL
@@ -332,6 +380,7 @@ class TerminalAndroidView @JvmOverloads constructor(
 
         override fun sendKeyEvent(event: KeyEvent?): Boolean {
             if (event == null) return false
+            android.util.Log.d(TAG, "sendKeyEvent: ${event.keyCode}, action=${event.action}")
 
             if (event.action == KeyEvent.ACTION_DOWN) {
                 when (event.keyCode) {
@@ -369,9 +418,9 @@ class TerminalAndroidView @JvmOverloads constructor(
                     }
                 }
 
-                // Handle Ctrl key combinations
+                // Handle Ctrl key combinations - use getUnicodeChar(0) to get base character
                 if (event.isCtrlPressed) {
-                    val char = event.unicodeChar
+                    val char = event.getUnicodeChar(0) // Get char without meta state
                     if (char in 'a'.code..'z'.code) {
                         sendData(byteArrayOf((char - 'a'.code + 1).toByte()))
                         return true
@@ -381,18 +430,27 @@ class TerminalAndroidView @JvmOverloads constructor(
                         return true
                     }
                 }
+
+                // Handle normal character input (fix for hardware keyboard)
+                val unicodeChar = event.unicodeChar
+                if (unicodeChar > 0) {
+                    sendText(unicodeChar.toChar().toString())
+                    return true
+                }
             }
 
             return super.sendKeyEvent(event)
         }
 
         override fun performEditorAction(editorAction: Int): Boolean {
+            android.util.Log.d(TAG, "performEditorAction: $editorAction")
             sendData(byteArrayOf(0x0D)) // Enter
             return true
         }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // Handle special keys
         when (keyCode) {
             KeyEvent.KEYCODE_ENTER -> {
                 sendData(byteArrayOf(0x0D))
@@ -410,30 +468,62 @@ class TerminalAndroidView @JvmOverloads constructor(
                 sendData(byteArrayOf(0x1B))
                 return true
             }
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                sendData("\u001B[A".toByteArray())
+                return true
+            }
+            KeyEvent.KEYCODE_DPAD_DOWN -> {
+                sendData("\u001B[B".toByteArray())
+                return true
+            }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                sendData("\u001B[C".toByteArray())
+                return true
+            }
+            KeyEvent.KEYCODE_DPAD_LEFT -> {
+                sendData("\u001B[D".toByteArray())
+                return true
+            }
         }
 
-        // Handle physical keyboard input
-        val char = event.unicodeChar
-        if (char != 0) {
-            if (event.isCtrlPressed && char in 'a'.code..'z'.code) {
+        // Handle Ctrl key combinations from physical keyboard
+        if (event.isCtrlPressed) {
+            val char = event.unicodeChar
+            if (char in 'a'.code..'z'.code) {
                 sendData(byteArrayOf((char - 'a'.code + 1).toByte()))
-            } else if (event.isCtrlPressed && char in 'A'.code..'Z'.code) {
-                sendData(byteArrayOf((char - 'A'.code + 1).toByte()))
-            } else {
-                sendText(char.toChar().toString())
+                return true
             }
+            if (char in 'A'.code..'Z'.code) {
+                sendData(byteArrayOf((char - 'A'.code + 1).toByte()))
+                return true
+            }
+        }
+
+        // Handle normal character input from hardware keyboard
+        // Extract unicode character directly instead of delegating to InputConnection
+        val unicodeChar = event.getUnicodeChar(event.metaState)
+        if (unicodeChar > 0) {
+            sendText(unicodeChar.toChar().toString())
             return true
         }
 
+        // Let InputConnection handle IME input
         return super.onKeyDown(keyCode, event)
     }
 
     private fun sendText(text: String) {
+        android.util.Log.d(TAG, "sendText: '$text'")
         sendData(text.toByteArray(Charsets.UTF_8))
     }
 
     private fun sendData(data: ByteArray) {
-        onSendData?.invoke(data)
+        val callback = onSendData
+        if (callback != null) {
+            android.util.Log.d(TAG, "sendData: ${data.size} bytes, first=${if (data.isNotEmpty()) data[0] else -1}")
+            callback.invoke(data)
+        } else {
+            android.util.Log.e(TAG, "sendData FAILED: onSendData callback is null!")
+        }
     }
 
     // Special key methods for toolbar
@@ -465,10 +555,7 @@ class TerminalAndroidView @JvmOverloads constructor(
         sendData(code.toByteArray())
     }
 
-    fun showSoftKeyboard() {
-        val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-        imm.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
-    }
+    // showSoftKeyboard is defined above using showKeyboard()
 
     fun sendFunctionKey(num: Int) {
         val code = when (num) {
@@ -496,9 +583,29 @@ class TerminalAndroidView @JvmOverloads constructor(
      * Set the terminal emulator to use (for session restore)
      */
     fun setTerminalEmulator(newEmulator: TerminalEmulator) {
+        // Clear old emulator callbacks to prevent memory leak
+        emulator.onScreenUpdate = null
+        emulator.onBell = null
+        emulator.onTitleChange = null
+
+        // Clear composition text from previous session
+        composingText = ""
+
+        // Set new emulator
         emulator = newEmulator
+
+        // Set up callbacks with dirty region optimization (same as init block)
         emulator.onScreenUpdate = {
-            postInvalidate()
+            val dirtyRegion = emulator.getDirtyRegion()
+            if (dirtyRegion != null && charWidth > 0 && charHeight > 0) {
+                val left = (dirtyRegion.minX * charWidth).toInt()
+                val top = (dirtyRegion.minY * charHeight).toInt()
+                val right = ((dirtyRegion.maxX + 1) * charWidth).toInt()
+                val bottom = ((dirtyRegion.maxY + 1) * charHeight).toInt()
+                postInvalidate(left, top, right, bottom)
+            } else {
+                postInvalidate()
+            }
         }
         emulator.onBell = {
             performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -550,12 +657,19 @@ fun TerminalView(
 ) {
     val context = LocalContext.current
 
+    // Use rememberUpdatedState to keep callbacks current
+    val currentOnSendData by androidx.compose.runtime.rememberUpdatedState(onSendData)
+    val currentOnSizeChanged by androidx.compose.runtime.rememberUpdatedState(onSizeChanged)
+    val currentOnViewCreated by androidx.compose.runtime.rememberUpdatedState(onViewCreated)
+
     val terminalView = remember {
-        TerminalAndroidView(context).apply {
-            this.onSendData = onSendData
-            this.onSizeChanged = onSizeChanged
-            setColorScheme(colorScheme)
-        }
+        TerminalAndroidView(context)
+    }
+
+    // Update callbacks whenever they change
+    LaunchedEffect(terminalView) {
+        terminalView.onSendData = { data -> currentOnSendData(data) }
+        terminalView.onSizeChanged = { cols, rows -> currentOnSizeChanged(cols, rows) }
     }
 
     // Update color scheme when it changes
@@ -564,12 +678,27 @@ fun TerminalView(
     }
 
     DisposableEffect(terminalView) {
-        onViewCreated(terminalView)
-        onDispose { }
+        currentOnViewCreated(terminalView)
+        // Request focus after view is attached to window (use postDelayed for better timing)
+        terminalView.postDelayed({
+            if (terminalView.isAttachedToWindow) {
+                val focused = terminalView.requestFocus()
+                android.util.Log.d("TerminalView", "Initial focus request: $focused")
+                terminalView.showSoftKeyboard()
+            }
+        }, 100)
+        onDispose {
+            android.util.Log.d("TerminalView", "DisposableEffect onDispose")
+        }
     }
 
     AndroidView(
         factory = { terminalView },
-        modifier = modifier.fillMaxSize()
+        modifier = modifier.fillMaxSize(),
+        update = { view ->
+            // Ensure callbacks are always set
+            view.onSendData = { data -> currentOnSendData(data) }
+            view.onSizeChanged = { cols, rows -> currentOnSizeChanged(cols, rows) }
+        }
     )
 }

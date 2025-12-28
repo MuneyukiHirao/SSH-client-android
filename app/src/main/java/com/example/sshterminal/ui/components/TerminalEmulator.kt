@@ -2,20 +2,29 @@ package com.example.sshterminal.ui.components
 
 import android.graphics.Color
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import kotlin.math.max
 import kotlin.math.min
 
 /**
  * Simple terminal emulator with VT100/xterm support
  * Handles escape sequences and maintains a scrollback buffer
+ * Thread-safe for concurrent access from UI and IO threads
  */
 class TerminalEmulator(
     initialColumns: Int = 80,
     initialRows: Int = 24,
     private val scrollbackLines: Int = 10000
 ) {
+    // Lock for thread-safe access to screen buffer and cursor
+    private val lock = ReentrantReadWriteLock()
+
+    @Volatile
     var columns: Int = initialColumns
         private set
+    @Volatile
     var rows: Int = initialRows
         private set
 
@@ -23,9 +32,11 @@ class TerminalEmulator(
     private var screen: Array<Array<TerminalCell>> = createScreen(columns, rows)
     private var scrollback: MutableList<Array<TerminalCell>> = mutableListOf()
 
-    // Cursor position (0-indexed)
+    // Cursor position (0-indexed) - volatile for thread-safe reads
+    @Volatile
     var cursorX: Int = 0
         private set
+    @Volatile
     var cursorY: Int = 0
         private set
 
@@ -143,36 +154,50 @@ class TerminalEmulator(
     }
 
     fun resize(newColumns: Int, newRows: Int) {
+        if (newColumns <= 0 || newRows <= 0) return
         if (newColumns == columns && newRows == rows) return
 
-        val newScreen = createScreen(newColumns, newRows)
+        lock.write {
+            val newScreen = createScreen(newColumns, newRows)
 
-        // Copy existing content
-        for (y in 0 until min(rows, newRows)) {
-            for (x in 0 until min(columns, newColumns)) {
-                newScreen[y][x] = screen[y][x].copy()
+            // Copy existing content
+            for (y in 0 until min(rows, newRows)) {
+                for (x in 0 until min(columns, newColumns)) {
+                    newScreen[y][x] = screen[y][x].copy()
+                }
             }
+
+            columns = newColumns
+            rows = newRows
+            screen = newScreen
+            scrollTop = 0
+            scrollBottom = rows - 1
+
+            // Adjust cursor
+            cursorX = min(cursorX, columns - 1)
+            cursorY = min(cursorY, rows - 1)
         }
-
-        columns = newColumns
-        rows = newRows
-        screen = newScreen
-        scrollTop = 0
-        scrollBottom = rows - 1
-
-        // Adjust cursor
-        cursorX = min(cursorX, columns - 1)
-        cursorY = min(cursorY, rows - 1)
 
         onScreenUpdate?.invoke()
     }
 
     fun processBytes(data: ByteArray) {
         val text = String(data, StandardCharsets.UTF_8)
-        for (char in text) {
-            processChar(char)
+        try {
+            lock.write {
+                for (char in text) {
+                    processChar(char)
+                }
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("TerminalEmulator", "Error processing bytes: ${e.message}", e)
         }
-        onScreenUpdate?.invoke()
+        // Invoke callback outside of lock to prevent deadlock
+        try {
+            onScreenUpdate?.invoke()
+        } catch (e: Exception) {
+            android.util.Log.e("TerminalEmulator", "Error in onScreenUpdate callback: ${e.message}", e)
+        }
     }
 
     private fun processChar(char: Char) {
@@ -189,7 +214,11 @@ class TerminalEmulator(
         when (char) {
             '\u0007' -> onBell?.invoke() // Bell
             '\u0008' -> cursorX = max(0, cursorX - 1) // Backspace
-            '\t' -> cursorX = min(columns - 1, (cursorX + 8) and 7.inv()) // Tab
+            '\t' -> {
+                // Move to next tab stop (every 8 columns)
+                val nextTabStop = ((cursorX / 8) + 1) * 8
+                cursorX = min(columns - 1, nextTabStop)
+            }
             '\n' -> lineFeed()
             '\r' -> cursorX = 0
             '\u001B' -> escapeState = EscapeState.ESCAPE
@@ -388,6 +417,12 @@ class TerminalEmulator(
             cursorX = 0
             lineFeed()
         }
+
+        // Bounds check after lineFeed (Critical fix)
+        if (cursorY < 0) cursorY = 0
+        if (cursorY >= rows) cursorY = rows - 1
+        if (cursorX < 0) cursorX = 0
+        if (cursorX >= columns) cursorX = columns - 1
 
         screen[cursorY][cursorX] = TerminalCell(
             char = char,
@@ -615,58 +650,88 @@ class TerminalEmulator(
     }
 
     fun getCell(x: Int, y: Int): TerminalCell? {
-        return screen.getOrNull(y)?.getOrNull(x)
+        return try {
+            lock.read {
+                screen.getOrNull(y)?.getOrNull(x)?.copy()
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("TerminalEmulator", "Error in getCell: ${e.message}")
+            null
+        }
     }
 
     fun getLine(y: Int): Array<TerminalCell>? {
-        return screen.getOrNull(y)
+        return try {
+            // Use tryLock with timeout to prevent UI thread blocking
+            if (lock.readLock().tryLock(10, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                try {
+                    screen.getOrNull(y)?.map { it.copy() }?.toTypedArray()
+                } finally {
+                    lock.readLock().unlock()
+                }
+            } else {
+                // If we can't get the lock quickly, return null to prevent freeze
+                null
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("TerminalEmulator", "Error in getLine: ${e.message}")
+            null
+        }
     }
 
     fun getScrollbackLine(index: Int): Array<TerminalCell>? {
-        return scrollback.getOrNull(index)
+        return lock.read {
+            scrollback.getOrNull(index)?.map { it.copy() }?.toTypedArray()
+        }
     }
 
-    fun getScrollbackSize(): Int = scrollback.size
+    fun getScrollbackSize(): Int = lock.read { scrollback.size }
 
     fun getScreenContent(): String {
-        val sb = StringBuilder()
-        for (y in 0 until rows) {
-            for (x in 0 until columns) {
-                sb.append(screen[y][x].char)
+        return lock.read {
+            val sb = StringBuilder()
+            for (y in 0 until rows) {
+                for (x in 0 until columns) {
+                    sb.append(screen[y][x].char)
+                }
+                sb.append('\n')
             }
-            sb.append('\n')
+            sb.toString()
         }
-        return sb.toString()
     }
 
     // Persistence methods
-    fun getScrollbackLines(): Int = scrollback.size
+    fun getScrollbackLines(): Int = lock.read { scrollback.size }
 
     /**
      * Save terminal state to a string for persistence
      */
     fun saveToString(): String {
-        val sb = StringBuilder()
-        // Save screen content (simplified - just characters)
-        for (y in 0 until rows) {
-            for (x in 0 until columns) {
-                sb.append(screen[y][x].char)
+        return lock.read {
+            val sb = StringBuilder()
+            // Save screen content (simplified - just characters)
+            for (y in 0 until rows) {
+                for (x in 0 until columns) {
+                    sb.append(screen[y][x].char)
+                }
+                if (y < rows - 1) sb.append('\n')
             }
-            if (y < rows - 1) sb.append('\n')
+            sb.toString()
         }
-        return sb.toString()
     }
 
     /**
      * Restore terminal state from a string
      */
     fun restoreFromString(content: String) {
-        val lines = content.split('\n')
-        for ((y, line) in lines.withIndex()) {
-            if (y >= rows) break
-            for ((x, char) in line.withIndex()) {
-                if (x >= columns) break
-                screen[y][x] = TerminalCell(char = char)
+        lock.write {
+            val lines = content.split('\n')
+            for ((y, line) in lines.withIndex()) {
+                if (y >= rows) break
+                for ((x, char) in line.withIndex()) {
+                    if (x >= columns) break
+                    screen[y][x] = TerminalCell(char = char)
+                }
             }
         }
         onScreenUpdate?.invoke()

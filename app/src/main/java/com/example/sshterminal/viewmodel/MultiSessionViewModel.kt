@@ -8,6 +8,8 @@ import com.example.sshterminal.data.ssh.SessionManager
 import com.example.sshterminal.data.ssh.TerminalSession
 import com.example.sshterminal.di.ServiceConnectionHolder
 import com.example.sshterminal.domain.model.Host
+import com.example.sshterminal.domain.model.HostKeyVerificationRequest
+import com.example.sshterminal.domain.model.PasswordRequest
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -18,24 +20,6 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
-
-data class HostKeyVerificationRequest(
-    val sessionId: String,
-    val fingerprint: String,
-    val algorithm: String,
-    val hostId: Long,
-    val hostname: String,
-    val port: Int,
-    val isKeyChanged: Boolean,
-    val previousFingerprint: String? = null
-)
-
-data class PasswordRequest(
-    val sessionId: String,
-    val hostId: Long,
-    val hostname: String,
-    val username: String
-)
 
 class MultiSessionViewModel(
     private val hostDao: HostDao,
@@ -154,10 +138,11 @@ class MultiSessionViewModel(
     fun connectWithPassword(password: String) {
         viewModelScope.launch {
             val request = _passwordRequest.value ?: return@launch
+            val sessionId = request.sessionId ?: return@launch
             _passwordRequest.value = null
 
             val host = pendingHost ?: return@launch
-            performConnect(request.sessionId, host, password)
+            performConnect(sessionId, host, password)
         }
     }
 
@@ -167,7 +152,7 @@ class MultiSessionViewModel(
     fun cancelPasswordRequest() {
         val request = _passwordRequest.value ?: return
         _passwordRequest.value = null
-        sessionManager?.closeSession(request.sessionId)
+        request.sessionId?.let { sessionManager?.closeSession(it) }
         pendingHost = null
         pendingSessionId = null
     }
@@ -222,7 +207,7 @@ class MultiSessionViewModel(
             hostDao.updateHostKeyFingerprint(request.hostId, request.fingerprint)
 
             // Close current session and reconnect
-            sessionManager?.closeSession(request.sessionId)
+            request.sessionId?.let { sessionManager?.closeSession(it) }
             connectToHost(request.hostId)
         }
     }
@@ -233,7 +218,7 @@ class MultiSessionViewModel(
     fun rejectHostKey() {
         val request = _hostKeyVerification.value ?: return
         _hostKeyVerification.value = null
-        sessionManager?.closeSession(request.sessionId)
+        request.sessionId?.let { sessionManager?.closeSession(it) }
     }
 
     /**
@@ -247,8 +232,18 @@ class MultiSessionViewModel(
      * Send data to the active session
      */
     fun sendData(data: ByteArray) {
-        val sessionId = activeSessionId.value ?: return
-        sessionManager?.sendData(sessionId, data)
+        val sessionId = activeSessionId.value
+        if (sessionId == null) {
+            android.util.Log.e("MultiSessionVM", "sendData FAILED: no active session")
+            return
+        }
+        val manager = sessionManager
+        if (manager == null) {
+            android.util.Log.e("MultiSessionVM", "sendData FAILED: sessionManager is null")
+            return
+        }
+        android.util.Log.d("MultiSessionVM", "sendData: ${data.size} bytes to session $sessionId")
+        manager.sendData(sessionId, data)
     }
 
     /**

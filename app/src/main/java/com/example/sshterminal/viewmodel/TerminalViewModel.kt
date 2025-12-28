@@ -9,6 +9,8 @@ import com.example.sshterminal.data.ssh.SSHClient
 import com.example.sshterminal.data.ssh.SSHConnectionState
 import com.example.sshterminal.data.ssh.SSHSession
 import com.example.sshterminal.domain.model.Host
+import com.example.sshterminal.domain.model.HostKeyVerificationRequest
+import com.example.sshterminal.domain.model.PasswordRequest
 import com.example.sshterminal.domain.model.PortForward
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,21 +54,6 @@ class TerminalViewModel(
     private var currentHost: Host? = null
     private var currentSession: SSHSession? = null
     private var readJob: Job? = null
-
-    data class HostKeyVerificationRequest(
-        val fingerprint: String,
-        val algorithm: String,
-        val hostId: Long,
-        val hostname: String,
-        val port: Int,
-        val isKeyChanged: Boolean,
-        val previousFingerprint: String? = null
-    )
-
-    data class PasswordRequest(
-        val hostname: String,
-        val username: String
-    )
 
     init {
         sshClient.onStateChanged = { state ->
@@ -124,7 +111,11 @@ class TerminalViewModel(
 
             // Check if we need password
             if (host.keyAlias == null && host.usePassword) {
-                _passwordRequest.value = PasswordRequest(host.hostname, host.username)
+                _passwordRequest.value = PasswordRequest(
+                    hostId = host.id,
+                    hostname = host.hostname,
+                    username = host.username
+                )
                 return@launch
             }
 

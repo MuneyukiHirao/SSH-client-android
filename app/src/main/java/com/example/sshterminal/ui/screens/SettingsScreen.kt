@@ -45,6 +45,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import com.example.sshterminal.BuildConfig
 import com.example.sshterminal.domain.model.TerminalColorScheme
 import com.example.sshterminal.domain.model.TerminalColors
 import com.example.sshterminal.domain.model.ThemeMode
@@ -245,7 +246,7 @@ fun SettingsScreen(
             SettingsSection("About") {
                 ClickableSettingItem(
                     title = "Version",
-                    description = "1.0.0",
+                    description = BuildConfig.VERSION_NAME,
                     onClick = { }
                 )
 

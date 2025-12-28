@@ -544,11 +544,22 @@ class SessionManager(
      * Send data to a session
      */
     fun sendData(sessionId: String, data: ByteArray) {
-        val session = sessions[sessionId] ?: return
+        val session = sessions[sessionId]
+        if (session == null) {
+            Log.e(TAG, "sendData FAILED: session not found for $sessionId")
+            return
+        }
+        val sshSession = session.sshSession
+        if (sshSession == null) {
+            Log.e(TAG, "sendData FAILED: sshSession is null for $sessionId, state=${session.state}")
+            return
+        }
+        Log.d(TAG, "sendData: ${data.size} bytes to session $sessionId")
         scope.launch(Dispatchers.IO) {
             try {
-                session.sshSession?.outputStream?.write(data)
-                session.sshSession?.outputStream?.flush()
+                sshSession.outputStream.write(data)
+                sshSession.outputStream.flush()
+                Log.d(TAG, "sendData: sent successfully")
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending data to session $sessionId", e)
                 session.state = TerminalSession.SessionState.Error("Write error: ${e.message}")
